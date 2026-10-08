@@ -20,7 +20,7 @@ namespace OWOneClick
         private const string TaskName = "OWOneClickElevated";
         private const string MutexName = "OWOneClickLauncher_8f3a1c";
         private const string AppTitle = "守望先锋一键启动";
-        private const string Version = "1.3.4";
+        private const string Version = "1.0.0";
 
         private static readonly string[] GameProcessNames = { "Overwatch", "NeacLoader", "OWNeacClient" };
         private static readonly string[] ClientProcessNames = { "Battle.net", "Battle.net Launcher" };
