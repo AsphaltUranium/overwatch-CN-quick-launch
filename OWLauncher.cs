@@ -20,7 +20,7 @@ namespace OWOneClick
         private const string TaskName = "OWOneClickElevated";
         private const string MutexName = "OWOneClickLauncher_8f3a1c";
         private const string AppTitle = "守望先锋一键启动";
-        private const string Version = "1.0.0";
+        private const string Version = "1.1";
 
         private static readonly string[] GameProcessNames = { "Overwatch", "NeacLoader", "OWNeacClient" };
         private static readonly string[] ClientProcessNames = { "Battle.net", "Battle.net Launcher" };
@@ -59,6 +59,10 @@ namespace OWOneClick
         private static extern bool IsWindowVisible(IntPtr hWnd);
         [DllImport("user32.dll")]
         private static extern bool IsIconic(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -87,6 +91,11 @@ namespace OWOneClick
         private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
         private const uint TOKEN_QUERY = 0x0008;
         private const int TokenElevation = 20;
+
+        private const uint WM_CLOSE = 0x0010;
+        private const uint WM_SYSCOMMAND = 0x0112;
+        private const int SC_MINIMIZE = 0xF020;
+        private const int SW_HIDE = 0;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
@@ -516,6 +525,7 @@ namespace OWOneClick
 
                 if (ok)
                 {
+                    HideClientWindow();   // 游戏已启动：隐藏战网窗口，然后退出
                     WriteResult("OK", "游戏启动成功");
                 }
                 else
@@ -733,6 +743,25 @@ namespace OWOneClick
             catch (Exception ex)
             {
                 Log("发送启动指令失败: " + ex.Message);
+            }
+        }
+
+        // 隐藏战网客户端窗口（SW_HIDE）：窗口从桌面彻底消失，后台进程保留。
+        // 在确认游戏已启动、程序退出前调用一次。
+        private static void HideClientWindow()
+        {
+            try
+            {
+                List<WinInfo> vis = EnumClientWindows().Where(x => x.Visible && !x.Mini).ToList();
+                foreach (WinInfo w in vis)
+                {
+                    ShowWindow(w.Hwnd, SW_HIDE);
+                    Log("已隐藏战网窗口: '" + w.Title + "' " + w.W + "x" + w.H);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("隐藏客户端窗口异常: " + ex.Message);
             }
         }
 
