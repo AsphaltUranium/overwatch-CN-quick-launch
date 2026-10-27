@@ -20,7 +20,7 @@ namespace OWOneClick
         private const string TaskName = "OWOneClickElevated";
         private const string MutexName = "OWOneClickLauncher_8f3a1c";
         private const string AppTitle = "守望先锋一键启动";
-        private const string Version = "1.1";
+        private const string Version = "1.2";
 
         private static readonly string[] GameProcessNames = { "Overwatch", "NeacLoader", "OWNeacClient" };
         private static readonly string[] ClientProcessNames = { "Battle.net", "Battle.net Launcher" };
@@ -32,15 +32,14 @@ namespace OWOneClick
         private static string ProductCode = "Pro";      // 守望先锋产品代码（GitHub 战网命令行文档验证）
         private static bool UseElevation = true;        // 是否用计划任务静默提权
         private static int GameTimeoutSec = 60;         // 发送启动指令后，检测游戏进程的最长时间（每 0.5 秒一次）
-        private static int WindowTimeoutSec = 60;       // 循环检测客户端开启的最长时间（每 0.5 秒一次）
+        private static int WindowTimeoutSec = 60;       // 等待战网客户端进程出现的最长时间（每 0.5 秒一次）
+        private static int LoginTimeoutSec = 60;        // 等待战网登录完成（主窗口出现）的最长时间
         private static string LaunchCommand;            // 自定义启动参数（留空用默认 --exec）
 
         // ==================== 数据文件 ====================
         private static string DataDir;
-        private static string StatusFile;
         private static string ResultFile;
         private static string FlowStartedFile;
-        private static string LogFile;
         private static string IniPath;
 
         // ==================== 运行模式 ====================
@@ -117,12 +116,6 @@ namespace OWOneClick
         [STAThread]
         private static void Main(string[] args)
         {
-            string bootFile = Path.Combine(Path.GetTempPath(), "owlauncher_boot.log");
-            try
-            {
-                File.AppendAllText(bootFile, DateTime.Now.ToString("O") + " main args=" + string.Join(" ", args) + "\r\n");
-            }
-            catch { }
             try
             {
                 ParseArgs(args);
@@ -143,10 +136,8 @@ namespace OWOneClick
                     DataDir = Path.Combine(Path.GetTempPath(), "OWOneClick");
                     Directory.CreateDirectory(DataDir);
                 }
-                StatusFile = Path.Combine(DataDir, "status.txt");
                 ResultFile = Path.Combine(DataDir, "result.txt");
                 FlowStartedFile = Path.Combine(DataDir, "flowstarted.txt");
-                LogFile = Path.Combine(DataDir, "log.txt");
                 IniPath = Path.Combine(ExeDir, "config.ini");
 
                 Log("=== " + AppTitle + " v" + Version + "  参数: " + string.Join(" ", args) + " ===");
@@ -169,7 +160,6 @@ namespace OWOneClick
             catch (Exception ex)
             {
                 Log("致命错误: " + ex);
-                try { File.AppendAllText(bootFile, DateTime.Now.ToString("O") + " FATAL: " + ex + "\r\n"); } catch { }
             }
         }
 
@@ -206,6 +196,7 @@ namespace OWOneClick
                         case "useelevation": UseElevation = ParseBool(v, UseElevation); break;
                         case "gametimeoutseconds": GameTimeoutSec = ParseInt(v, GameTimeoutSec); break;
                         case "windowtimeoutseconds": WindowTimeoutSec = ParseInt(v, WindowTimeoutSec); break;
+                        case "logintimeoutseconds": LoginTimeoutSec = ParseInt(v, LoginTimeoutSec); break;
                         case "launchcommand": if (v.Length > 0) LaunchCommand = v; break;
                     }
                 }
@@ -238,20 +229,15 @@ namespace OWOneClick
             return Path.Combine(ExeDir, "Battle.net.exe");
         }
 
-        // ==================== 日志 ====================
+        // ==================== 状态/结果 ====================
         private static void Log(string msg)
         {
-            try
-            {
-                File.AppendAllText(LogFile, DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + "\r\n", Encoding.UTF8);
-            }
-            catch { }
+            // 日志已移除（程序很小，不需要落盘日志）
         }
 
         private static void WriteStatus(string text)
         {
-            Log("状态: " + text);
-            try { File.WriteAllText(StatusFile, text, Encoding.UTF8); } catch { }
+            // 无 UI、无日志，状态不需要落盘
         }
 
         private static void WriteResult(string code, string msg)
@@ -265,19 +251,10 @@ namespace OWOneClick
             try { if (File.Exists(path)) File.Delete(path); } catch { }
         }
 
-        // 统一弹窗：Windows 原生 MessageBox（user32）+ MB_TOPMOST 置顶。
-        // 原生外观/音效/图标全保留；TOPMOST 不依赖抢焦点，
-        // 所以在 UAC 拒绝后的前台锁定（约 200 秒）下也能显示在最上层。
+        // 统一弹窗：自制仿 Windows MessageBox（TopMost 置顶，系统图标 + 系统音效）。
+        // 不用原生 MessageBox，避免 UAC 提权启动后原生窗口被压到后层看不见。
+        // 标题栏不带软件图标，对齐原生；Error/Warning 用对应的系统图标和音效。
         private static void ShowMsg(string title, string message, MessageBoxIcon icon)
-        {
-            uint type = MB_OK | MB_TOPMOST | MB_SETFOREGROUND |
-                        (icon == MessageBoxIcon.Error ? MB_ICONERROR : MB_ICONWARNING);
-            MessageBox(IntPtr.Zero, message, title, type);
-        }
-
-        // 仅"拒绝 UAC"场景用：自定义弹窗（TopMost 置顶，盖过前台锁定）。
-        // 系统感叹号图标 + 系统音效；标题栏不带软件图标，对齐原生。
-        private static void ShowMsgTopMost(string title, string message)
         {
             using (Form f = new Form())
             {
@@ -288,23 +265,26 @@ namespace OWOneClick
                 f.StartPosition = FormStartPosition.CenterScreen;
                 f.TopMost = true;
                 f.ShowInTaskbar = false;
-                f.ShowIcon = false;   // 标题栏不带软件图标
+                f.ShowIcon = false;
                 f.Font = SystemFonts.MessageBoxFont;
 
+                Icon sysIcon = (icon == MessageBoxIcon.Error) ? SystemIcons.Error : SystemIcons.Warning;
                 PictureBox pb = new PictureBox();
-                pb.Image = SystemIcons.Warning.ToBitmap();
+                pb.Image = sysIcon.ToBitmap();
                 pb.SizeMode = PictureBoxSizeMode.Normal;
                 pb.Location = new Point(16, 16);
 
+                // 文字宽度固定，按同一宽度测量高度并留余量，避免最后一行被裁
+                const int textWidth = 340;
                 Label lbl = new Label();
                 lbl.Text = message;
                 lbl.Font = SystemFonts.MessageBoxFont;
                 lbl.TextAlign = ContentAlignment.TopLeft;
                 lbl.AutoSize = false;
                 Size ms = TextRenderer.MeasureText(message, lbl.Font,
-                    new Size(340, int.MaxValue), TextFormatFlags.WordBreak);
+                    new Size(textWidth, int.MaxValue), TextFormatFlags.WordBreak);
                 lbl.Location = new Point(pb.Right + 12, 16);
-                lbl.Size = new Size(ms.Width, ms.Height);
+                lbl.Size = new Size(textWidth, ms.Height + 8);
 
                 Button ok = new Button();
                 ok.Text = "确定";
@@ -312,9 +292,9 @@ namespace OWOneClick
                 ok.Font = SystemFonts.MessageBoxFont;
                 ok.Size = new Size(84, 28);
 
-                int fw = Math.Max(lbl.Right + 24, pb.Right + 24);
-                if (fw < 260) fw = 260;
-                ok.Location = new Point(fw - ok.Width - 12, lbl.Bottom + 18);
+                int fw = Math.Max(pb.Right + 12 + textWidth + 24, 260);
+                int contentBottom = Math.Max(lbl.Bottom, pb.Bottom);
+                ok.Location = new Point(fw - ok.Width - 12, contentBottom + 18);
 
                 f.ClientSize = new Size(fw, ok.Bottom + 12);
                 f.Controls.Add(pb);
@@ -322,7 +302,29 @@ namespace OWOneClick
                 f.Controls.Add(ok);
                 f.AcceptButton = ok;
 
-                try { SystemSounds.Exclamation.Play(); } catch { }
+                // 出现时置顶；稍后取消强制置顶，恢复普通窗口（点别处可被遮盖）
+                f.Shown += delegate
+                {
+                    f.Activate();
+                    Thread th = new Thread(delegate()
+                    {
+                        Thread.Sleep(600);
+                        try
+                        {
+                            f.BeginInvoke((Action)(delegate { try { f.TopMost = false; } catch { } }));
+                        }
+                        catch { }
+                    });
+                    th.IsBackground = true;
+                    th.Start();
+                };
+
+                try
+                {
+                    if (icon == MessageBoxIcon.Error) SystemSounds.Hand.Play();
+                    else SystemSounds.Exclamation.Play();
+                }
+                catch { }
 
                 f.ShowDialog();
             }
@@ -398,11 +400,11 @@ namespace OWOneClick
                     {
                         // UAC 被拒绝或提权流程未能启动：明确提示用户需要一次管理员权限
                         Log("未获得管理员权限（创建计划任务需要），提示用户");
-                        ShowMsgTopMost(AppTitle,
+                        ShowMsg(AppTitle,
                             "首次使用需要一次管理员权限（用于创建计划任务，只需一次）。\n\n" +
                             "请重新运行本程序，在弹出的 UAC 窗口中点击“是”同意；\n" +
                             "或右键本程序选择“以管理员身份运行”。\n\n" +
-                            "创建成功后即可全程静默使用，不再需要任何权限。");
+                            "创建成功后即可全程静默使用，不再需要任何权限。", MessageBoxIcon.Warning);
                     }
                 }
                 else
@@ -494,13 +496,25 @@ namespace OWOneClick
                     if (!WaitForClientProcess(TimeSpan.FromSeconds(WindowTimeoutSec)))
                     {
                         WriteResult("FAIL", "等待战网客户端启动超时");
-                        ShowMsg(AppTitle, "未检测到战网客户端启动。\n\n请稍后重试。\n详细日志：" + LogFile, MessageBoxIcon.Warning);
+                        ShowMsg(AppTitle, "未检测到战网客户端启动。\n\n请稍后重试。", MessageBoxIcon.Warning);
                         return;
                     }
                 }
                 else
                 {
                     Log("战网客户端已在运行");
+                }
+
+                // 等主窗口出现后再开始发送：登录窗阶段空发指令会让鼠标光标反复闪烁
+                WriteStatus("等待战网主窗口就绪…");
+                if (!WaitForMainWindow(TimeSpan.FromSeconds(LoginTimeoutSec)))
+                {
+                    WriteResult("FAIL", "等待战网主窗口超时");
+                    ShowMsg(AppTitle,
+                        "等待战网登录完成超时（" + LoginTimeoutSec + " 秒）。\n\n" +
+                        "请确认战网已完成登录，然后重新运行本程序。",
+                        MessageBoxIcon.Warning);
+                    return;
                 }
 
                 // 持续发送：每 0.5 秒轮询游戏进程，同时每次都发送启动指令
@@ -531,13 +545,13 @@ namespace OWOneClick
                 else
                 {
                     WriteResult("FAIL", "未检测到游戏启动成功");
-                    ShowMsg(AppTitle, "未检测到游戏启动成功！\n\n请确认战网已经登录，然后重新运行本程序。\n详细日志：" + LogFile, MessageBoxIcon.Warning);
+                    ShowMsg(AppTitle, "未检测到游戏启动成功！\n\n请确认战网已经登录，然后重新运行本程序。", MessageBoxIcon.Warning);
                 }
             }
             catch (Exception ex)
             {
                 Log("提权流程异常: " + ex);
-                WriteResult("FAIL", "发生错误：" + ex.Message + " 日志：" + LogFile);
+                WriteResult("FAIL", "发生错误：" + ex.Message);
             }
         }
 
@@ -583,6 +597,32 @@ namespace OWOneClick
         {
             return w.Visible &&
                    (w.Title.Contains("登录") || w.Title.Contains("Login") || w.Class.Contains("QWindowIcon"));
+        }
+
+        // 主窗口"存在"判定：只认"窗口类型"（CEF 主界面类 Chrome_WidgetWin_0）+ 有非空标题，
+        // 不穷举具体标题文字（兼容繁体/其他语言），也不要求可见（兼容托盘），不用尺寸。
+        // 登录窗/过渡窗是 Qt 类，CEF 辅助窗口标题为空，都会被排除。
+        private static bool IsMainWindowExists(WinInfo w)
+        {
+            return w.Class.Contains("Chrome_WidgetWin_0") && w.Title.Length > 0;
+        }
+
+        // 等主窗口出现后再开始发送指令：登录窗阶段不发，避免每次发送导致的鼠标光标闪烁
+        private static bool WaitForMainWindow(TimeSpan timeout)
+        {
+            DateTime deadline = DateTime.Now + timeout;
+            while (DateTime.Now < deadline)
+            {
+                WinInfo main = EnumClientWindows().Where(IsMainWindowExists).FirstOrDefault();
+                if (main != null)
+                {
+                    Log("检测到主窗口: 类=" + main.Class + " 标题='" + main.Title +
+                        "' 可见=" + main.Visible + " 最小化=" + main.Mini);
+                    return true;
+                }
+                Thread.Sleep(500);
+            }
+            return false;
         }
 
         // ==================== 窗口检测 ====================
@@ -894,7 +934,8 @@ namespace OWOneClick
             sb.AppendLine("注册表直读测试(WOW6432Node\\Uninstall\\Battle.net): " + regTest);
             sb.AppendLine("产品代码: " + ProductCode);
             sb.AppendLine("配置: UseElevation=" + UseElevation +
-                          " GameTimeoutSec=" + GameTimeoutSec + " WindowTimeoutSec=" + WindowTimeoutSec);
+                          " GameTimeoutSec=" + GameTimeoutSec + " WindowTimeoutSec=" + WindowTimeoutSec +
+                          " LoginTimeoutSec=" + LoginTimeoutSec);
             sb.AppendLine("计划任务存在: " + TaskExistsViaCom());
             sb.AppendLine("当前进程提权: " + IsUserAdmin());
             sb.AppendLine("战网客户端运行中: " + IsClientRunning() + "  已提权: " + IsAnyClientElevated());
